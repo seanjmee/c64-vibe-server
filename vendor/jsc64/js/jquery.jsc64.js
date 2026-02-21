@@ -80,6 +80,10 @@ jQuery.fn.extend({
 	loadPrg: function(url) {
     	var binFileReader = new BinFileReader(url), ba = nl.kingsquare.as3.flash.utils.getByteArray(binFileReader.readString(binFileReader.getFileSize())),
         startAddress = 0, addr = 0, jsc64Instance =  $(this).data('c64');
+		var writeWord = function(address, value) {
+			jsc64Instance._mem.write(address, value & 0xff);
+			jsc64Instance._mem.write(address + 1, (value >> 8) & 0xff);
+		};
 
 		// get start address
 		ba.endian = Endian.LITTLE_ENDIAN;
@@ -91,22 +95,28 @@ jQuery.fn.extend({
 			jsc64Instance._mem.write(addr++, ba[i]);
 		}
 		if(startAddress == 0x0801) {
+			// Keep BASIC pointers in sync with the loaded program.
+			// Without this, repeated direct-memory loads can leave stale pointers
+			// and cause LIST/RUN corruption (phantom lines, wrong jumps).
+			writeWord(0x002b, startAddress); // TXTTAB
+			writeWord(0x002d, addr);         // VARTAB
+			writeWord(0x002f, addr);         // ARYTAB
+			writeWord(0x0031, addr);         // STREND
+
 			// run command
-			// Clear queued keyboard input to avoid stale RUN/INPUT artifacts across repeated loads.
+			// Clear only the C64 keyboard queue (631..640 / 0x0277..0x0280).
+			// Touching wider system RAM can corrupt KERNAL/BASIC state.
 			jsc64Instance._mem.write(0xc6, 0);
-			for(var k = 0x0278; k <= 0x02ff; k++) {
+			for(var k = 0x0277; k <= 0x0280; k++) {
 				jsc64Instance._mem.write(k, 0);
 			}
-
-			var charsInBuffer = jsc64Instance._mem.read(0xc6);
-			if(charsInBuffer < jsc64Instance._mem.read(0x0289) - 4) {
-				var keyboardBuffer = 0x0277 + charsInBuffer + 1;
-				jsc64Instance._mem.write(keyboardBuffer++, 82); // R
-				jsc64Instance._mem.write(keyboardBuffer++, 85); // U
-				jsc64Instance._mem.write(keyboardBuffer++, 78); // N
-				jsc64Instance._mem.write(keyboardBuffer++, 13); // Return
-				jsc64Instance._mem.write(0xc6, charsInBuffer + 4);
-			}
+			// Deterministically enqueue: R U N <RETURN>
+			var keyboardBuffer = 0x0277;
+			jsc64Instance._mem.write(keyboardBuffer++, 82); // R
+			jsc64Instance._mem.write(keyboardBuffer++, 85); // U
+			jsc64Instance._mem.write(keyboardBuffer++, 78); // N
+			jsc64Instance._mem.write(keyboardBuffer++, 13); // Return
+			jsc64Instance._mem.write(0xc6, 4);
 		} else {
 			jsc64Instance._cpu.pc = startAddress;
 		}

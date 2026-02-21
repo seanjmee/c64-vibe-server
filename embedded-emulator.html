@@ -75,9 +75,33 @@
           }
           try {
             instance.loadPrg(url + (url.includes("?") ? "&" : "?") + "t=" + Date.now());
+            // Some jsc64 builds occasionally drop the first queued RETURN.
+            // Re-queue RUN from the frame after load with short retries.
+            queueRunCommand();
+            window.setTimeout(queueRunCommand, 120);
+            window.setTimeout(queueRunCommand, 320);
             setStatus("loaded " + url);
           } catch (error) {
             setStatus("load error: " + error.message);
+          }
+        }
+
+        function queueRunCommand() {
+          if (!instance || !instance.jsc64GetInstance) return;
+          var emu = instance.jsc64GetInstance();
+          if (!emu || !emu._mem) return;
+          try {
+            var base = 0x0277; // keyboard queue start (631)
+            emu._mem.write(0xc6, 0); // clear queue count
+            for (var i = 0; i < 10; i += 1) emu._mem.write(base + i, 0);
+            emu._mem.write(base + 0, 82); // R
+            emu._mem.write(base + 1, 85); // U
+            emu._mem.write(base + 2, 78); // N
+            emu._mem.write(base + 3, 13); // RETURN
+            emu._mem.write(base + 4, 13); // RETURN (retry)
+            emu._mem.write(0xc6, 5);
+          } catch (error) {
+            // no-op: best-effort queue injection
           }
         }
 
