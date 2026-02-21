@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>C64 Backend Dashboard</title>
+    <style>
+      :root {
+        --bg: #0f1324;
+        --panel: #1b2340;
+        --panel2: #222d52;
+        --ink: #e8eeff;
+        --muted: #aab6df;
+        --ok: #2eb67d;
+        --warn: #e6a92a;
+        --bad: #d94f4f;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: radial-gradient(circle at 15% 10%, #2f3159, transparent 40%), var(--bg);
+        color: var(--ink);
+        font-family: "Space Grotesk", system-ui, sans-serif;
+      }
+      main {
+        max-width: 1300px;
+        margin: 0 auto;
+        padding: 20px;
+        display: grid;
+        gap: 14px;
+      }
+      .head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      h1,
+      h2 {
+        margin: 0;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .cards {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(120px, 1fr));
+        gap: 10px;
+      }
+      .card {
+        background: linear-gradient(180deg, var(--panel2), var(--panel));
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 10px;
+        padding: 10px;
+      }
+      .card .label {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .card .value {
+        font-size: 24px;
+        font-weight: 700;
+      }
+      .ok {
+        color: var(--ok);
+      }
+      .warn {
+        color: var(--warn);
+      }
+      .bad {
+        color: var(--bad);
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+      .panel {
+        background: linear-gradient(180deg, var(--panel2), var(--panel));
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 10px;
+        padding: 12px;
+      }
+      ul {
+        margin: 8px 0 0;
+        padding-left: 18px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+      th,
+      td {
+        border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+        padding: 6px;
+        text-align: left;
+        vertical-align: top;
+      }
+      .mono {
+        font-family: ui-monospace, Menlo, monospace;
+      }
+      @media (max-width: 1100px) {
+        .cards {
+          grid-template-columns: repeat(3, minmax(120px, 1fr));
+        }
+        .grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="head">
+        <div>
+          <h1>C64 Backend Dashboard</h1>
+          <div class="muted">Validation pipeline, generation quality, fallback pressure, run telemetry</div>
+        </div>
+        <button id="refresh">Refresh</button>
+      </section>
+
+      <section class="cards" id="cards"></section>
+
+      <section class="grid">
+        <article class="panel">
+          <h2>By Validation</h2>
+          <ul id="byValidation"></ul>
+        </article>
+        <article class="panel">
+          <h2>By Strategy</h2>
+          <ul id="byStrategy"></ul>
+        </article>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
+          <h2>Top Lint Findings</h2>
+          <ul id="topLint"></ul>
+        </article>
+        <article class="panel">
+          <h2>Run Outcomes</h2>
+          <ul id="runOutcome"></ul>
+        </article>
+      </section>
+
+      <section class="panel">
+        <h2>Recent Generations</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Prompt</th>
+              <th>Validation</th>
+              <th>Strategy</th>
+              <th>Lint (init->final)</th>
+              <th>Normalized</th>
+              <th>Exemplars</th>
+            </tr>
+          </thead>
+          <tbody id="recentRows"></tbody>
+        </table>
+      </section>
+    </main>
+    <script type="module" src="/dashboard.js"></script>
+  </body>
+</html>

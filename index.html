@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>C64 Vibe Coder MVP</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=VT323&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="bg-noise" aria-hidden="true"></div>
+    <main class="app-shell">
+      <section class="panel panel-left">
+        <header class="panel-header">
+          <div>
+            <p class="kicker">MVP</p>
+            <h1>C64 Vibe Coder</h1>
+          </div>
+          <div class="header-actions">
+            <a class="button ghost" href="/dashboard.html" target="_blank" rel="noreferrer">Backend Dashboard</a>
+            <button id="newSession" class="button ghost">New Session</button>
+          </div>
+        </header>
+
+        <div id="chatFeed" class="chat-feed" aria-live="polite"></div>
+
+        <section class="editor-block">
+          <div class="editor-header">
+            <h2>program.bas</h2>
+            <div class="editor-actions">
+              <button id="applyPatch" class="button">Apply Last Patch</button>
+              <button id="runProgram" class="button primary">Run</button>
+            </div>
+          </div>
+          <textarea id="codeEditor" spellcheck="false"></textarea>
+        </section>
+
+        <form id="chatForm" class="chat-form">
+          <label for="chatInput" class="sr-only">Prompt</label>
+          <textarea
+            id="chatInput"
+            placeholder="Describe what you want in C64 BASIC (e.g., 'make a bouncing border color demo')"
+            rows="3"
+            required
+          ></textarea>
+          <button class="button primary" type="submit">Send</button>
+        </form>
+      </section>
+
+      <section class="panel panel-right">
+        <header class="panel-header">
+          <div>
+            <p class="kicker">Runtime</p>
+            <h2>Commodore 64</h2>
+          </div>
+          <div class="runtime-actions">
+            <button id="toggleRuntime" class="button ghost">Use Real Emulator</button>
+            <button id="resetMachine" class="button ghost">Reset</button>
+            <button id="exportPrg" class="button">Export .prg</button>
+          </div>
+        </header>
+
+        <div class="monitor-wrap">
+          <div class="monitor-bezel">
+            <pre id="monitor" class="monitor" aria-label="C64 screen"></pre>
+            <iframe id="emulatorFrame" class="emulator-frame hidden" title="C64 Emulator"></iframe>
+          </div>
+        </div>
+
+        <section class="runtime-log-wrap">
+          <div class="runtime-log-header">
+            <h3>Execution Log</h3>
+            <div class="runtime-badges">
+              <span id="modelMetrics" class="status-pill">gen: n/a</span>
+              <span id="emulatorStatus" class="status-pill">simulated runtime</span>
+            </div>
+          </div>
+          <pre id="runtimeLog" class="runtime-log"></pre>
+        </section>
+
+        <section class="validator-report-wrap">
+          <div class="runtime-log-header">
+            <h3>Validator Report</h3>
+          </div>
+          <pre id="validatorReport" class="runtime-log">No generation yet.</pre>
+        </section>
+      </section>
+    </main>
+
+    <template id="chatBubbleTemplate">
+      <article class="bubble">
+        <header>
+          <span class="role"></span>
+          <time class="timestamp"></time>
+        </header>
+        <p class="message"></p>
+      </article>
+    </template>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Embedded C64 Emulator</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #111426;
+        color: #cfd6ff;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      #container {
+        width: 100%;
+        height: 100%;
+        position: relative;
+        overflow: hidden;
+      }
+      #container > * {
+        position: absolute;
+        top: 0;
+        left: 0;
+        transform-origin: 0 0;
+        image-rendering: pixelated;
+      }
+      .status {
+        position: fixed;
+        right: 0.5rem;
+        bottom: 0.5rem;
+        font-size: 0.75rem;
+        opacity: 0.8;
+        background: rgba(0, 0, 0, 0.35);
+        padding: 0.2rem 0.4rem;
+        border-radius: 0.3rem;
+      }
+    </style>
+    <script>
+      var JSC64_BASEPATH = "/vendor/jsc64/js/";
+    </script>
+    <script src="/vendor/jsc64/js/jquery/jquery-1.12.4.min.js"></script>
+    <script src="/vendor/jsc64/js/jquery.jsc64classes.js"></script>
+    <script src="/vendor/jsc64/js/jquery.jsc64.js"></script>
+  </head>
+  <body>
+    <div id="container"></div>
+    <div id="status" class="status">booting emulator...</div>
+
+    <script>
+      (function () {
+        var emulatorReady = false;
+        var pendingPrgUrl = "";
+        var instance = null;
+        var status = document.getElementById("status");
+        var container = document.getElementById("container");
+        var fitTimer = null;
+
+        function setStatus(text) {
+          status.textContent = text;
+          try {
+            window.parent.postMessage({ type: "emulatorStatus", status: String(text || "") }, "*");
+          } catch (error) {
+            // no-op: parent messaging is optional
+          }
+        }
+
+        function loadPrgIfReady(url) {
+          if (!url) return;
+          if (!instance || !emulatorReady) {
+            pendingPrgUrl = url;
+            setStatus("queued prg load...");
+            return;
+          }
+          try {
+            instance.loadPrg(url + (url.includes("?") ? "&" : "?") + "t=" + Date.now());
+            setStatus("loaded " + url);
+          } catch (error) {
+            setStatus("load error: " + error.message);
+          }
+        }
+
+        function fitEmulator() {
+          if (!container) return;
+          var layers = container.querySelectorAll("canvas");
+          if (!layers.length) return;
+          var baseW = layers[0].width || layers[0].offsetWidth || 403;
+          var baseH = layers[0].height || layers[0].offsetHeight || 284;
+          var pad = 10;
+          var availW = Math.max(10, container.clientWidth - pad * 2);
+          var availH = Math.max(10, container.clientHeight - pad * 2);
+          var scale = Math.min(availW / baseW, availH / baseH);
+          if (!isFinite(scale) || scale <= 0) scale = 1;
+          scale = Math.max(0.5, Math.min(scale, 3));
+          var scaledW = baseW * scale;
+          var scaledH = baseH * scale;
+          var offsetX = Math.max(0, Math.floor((container.clientWidth - scaledW) / 2));
+          var offsetY = Math.max(0, Math.floor((container.clientHeight - scaledH) / 2));
+          for (var i = 0; i < layers.length; i += 1) {
+            layers[i].style.left = offsetX + "px";
+            layers[i].style.top = offsetY + "px";
+            layers[i].style.transform = "scale(" + scale.toFixed(3) + ")";
+          }
+        }
+
+        $(document).ready(function () {
+          instance = $("#container").jsc64($(document));
+          var jsc64Instance = instance.jsc64GetInstance();
+          var percentageComplete = 0;
+          fitTimer = window.setInterval(fitEmulator, 120);
+          window.addEventListener("resize", fitEmulator);
+
+          var bootWait = function () {
+            percentageComplete += 1;
+            if (percentageComplete >= 100) {
+              emulatorReady = true;
+              setStatus("emulator ready");
+              jsc64Instance._renderer.frameTimer.detachEvent("timer", bootWait);
+              fitEmulator();
+              if (pendingPrgUrl) {
+                loadPrgIfReady(pendingPrgUrl);
+                pendingPrgUrl = "";
+              }
+            } else if (percentageComplete % 10 === 0) {
+              setStatus("boot " + percentageComplete + "%");
+            }
+          };
+
+          jsc64Instance._renderer.frameTimer.addEventListener("timer", bootWait);
+        });
+
+        window.addEventListener("message", function (event) {
+          if (!event || !event.data || typeof event.data !== "object") return;
+          if (event.data.type === "loadPrg" && typeof event.data.url === "string") {
+            loadPrgIfReady(event.data.url);
+          }
+        });
+      })();
+    </script>
+  </body>
+</html>
