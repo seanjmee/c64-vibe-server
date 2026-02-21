@@ -25,7 +25,7 @@
         font-family: "Space Grotesk", system-ui, sans-serif;
       }
       main {
-        max-width: 1300px;
+        max-width: 1500px;
         margin: 0 auto;
         padding: 20px;
         display: grid;
@@ -76,6 +76,11 @@
         grid-template-columns: 1fr 1fr;
         gap: 12px;
       }
+      .grid3 {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 12px;
+      }
       .panel {
         background: linear-gradient(180deg, var(--panel2), var(--panel));
         border: 1px solid rgba(255, 255, 255, 0.12);
@@ -101,11 +106,47 @@
       .mono {
         font-family: ui-monospace, Menlo, monospace;
       }
+      .stack {
+        display: grid;
+        gap: 8px;
+      }
+      .badge {
+        display: inline-block;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        border-radius: 999px;
+        padding: 0 8px;
+        font-size: 11px;
+      }
+      .row-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      input,
+      textarea,
+      button {
+        font: inherit;
+      }
+      textarea {
+        width: 100%;
+        min-height: 78px;
+        background: rgba(0, 0, 0, 0.2);
+        color: var(--ink);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        border-radius: 8px;
+        padding: 8px;
+      }
+      .small {
+        font-size: 11px;
+      }
       @media (max-width: 1100px) {
         .cards {
           grid-template-columns: repeat(3, minmax(120px, 1fr));
         }
         .grid {
+          grid-template-columns: 1fr;
+        }
+        .grid3 {
           grid-template-columns: 1fr;
         }
       }
@@ -134,6 +175,21 @@
         </article>
       </section>
 
+      <section class="grid3">
+        <article class="panel">
+          <h2>Repair Funnel</h2>
+          <ul id="repairFunnel"></ul>
+        </article>
+        <article class="panel">
+          <h2>7-Day Scorecard</h2>
+          <ul id="score7"></ul>
+        </article>
+        <article class="panel">
+          <h2>30-Day Scorecard</h2>
+          <ul id="score30"></ul>
+        </article>
+      </section>
+
       <section class="grid">
         <article class="panel">
           <h2>Top Lint Findings</h2>
@@ -142,6 +198,28 @@
         <article class="panel">
           <h2>Run Outcomes</h2>
           <ul id="runOutcome"></ul>
+        </article>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
+          <h2>Intent Clusters</h2>
+          <ul id="intentClusters"></ul>
+        </article>
+        <article class="panel">
+          <h2>Validator Heatmap</h2>
+          <ul id="heatmap"></ul>
+        </article>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
+          <h2>Exemplar Impact (A/B)</h2>
+          <ul id="exemplarImpact"></ul>
+        </article>
+        <article class="panel">
+          <h2>Drift Detection</h2>
+          <ul id="driftAlerts"></ul>
         </article>
       </section>
 
@@ -160,6 +238,49 @@
             </tr>
           </thead>
           <tbody id="recentRows"></tbody>
+        </table>
+      </section>
+
+      <section class="grid">
+        <article class="panel stack">
+          <h2>Replay + Judge</h2>
+          <div class="small muted">Run an historical prompt through current pipeline without applying patch.</div>
+          <textarea id="replayPrompt" placeholder="Paste a prompt to replay..."></textarea>
+          <div class="row-actions">
+            <button id="runReplay">Run Replay</button>
+            <label><input id="replayJudge" type="checkbox" checked /> Judge output</label>
+          </div>
+          <pre id="replayResult" class="mono small"></pre>
+        </article>
+        <article class="panel">
+          <h2>Pinned Exemplars</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Family</th>
+                <th>Prompt</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="pinnedRows"></tbody>
+          </table>
+        </article>
+      </section>
+
+      <section class="panel">
+        <h2>Exemplar Library</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Family</th>
+              <th>Prompt</th>
+              <th>Validation</th>
+              <th>Lint (init->final)</th>
+              <th>Seed</th>
+            </tr>
+          </thead>
+          <tbody id="exemplarRows"></tbody>
         </table>
       </section>
     </main>

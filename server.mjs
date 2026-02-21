@@ -9,6 +9,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 const RUNTIME_DIR = path.join(ROOT, "runtime");
 const RUN_LOG_PATH = path.join(RUNTIME_DIR, "runs.jsonl");
+const PINNED_EXEMPLARS_PATH = path.join(RUNTIME_DIR, "pinned-exemplars.json");
 
 const CONTENT_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -461,6 +462,41 @@ function tokenizePrompt(text) {
   );
 }
 
+function detectPromptIntent(text) {
+  const p = ` ${String(text || "").toLowerCase()} `;
+  if (/\bbounce|ball|animate|animation|move|sprite|starfield|scroll\b/.test(p)) return "animation";
+  if (/\bconvert|converter|celsius|fahrenheit|km|miles|pounds|kg|inch|cm\b/.test(p)) return "converter";
+  if (/\bgame|snake|pong|maze|shoot|play\b/.test(p)) return "game";
+  if (/\bprint|text|banner|title|menu|pyramid|pattern\b/.test(p)) return "text_ui";
+  if (/\bmath|random|calc|equation|formula\b/.test(p)) return "math";
+  return "general";
+}
+
+function detectPromptFamily(text) {
+  const raw = String(text || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length >= 4);
+  const stop = new Set([
+    "create",
+    "build",
+    "make",
+    "program",
+    "basic",
+    "commodore",
+    "vibe",
+    "coder",
+    "please",
+    "with",
+    "that",
+    "this",
+    "tool",
+  ]);
+  const keyword = raw.find((w) => !stop.has(w)) || "generic";
+  return `${detectPromptIntent(text)}:${keyword}`;
+}
+
 function scorePromptSimilarity(a, b) {
   const sa = tokenizePrompt(a);
   const sb = tokenizePrompt(b);
@@ -504,7 +540,40 @@ async function readRunLog(limit = 500) {
   }
 }
 
+async function readPinnedExemplars() {
+  try {
+    const raw = await fs.readFile(PINNED_EXEMPLARS_PATH, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((entry) => entry && typeof entry === "object")
+      .filter(
+        (entry) =>
+          typeof entry.family === "string" &&
+          typeof entry.prompt === "string" &&
+          typeof entry.program === "string" &&
+          entry.family.trim() &&
+          entry.program.trim()
+      )
+      .map((entry) => ({
+        family: entry.family.trim(),
+        prompt: entry.prompt.trim(),
+        program: entry.program,
+        pinned_at: String(entry.pinned_at || ""),
+      }));
+  } catch {
+    return [];
+  }
+}
+
+async function writePinnedExemplars(entries) {
+  await ensureRuntimeDir();
+  await fs.writeFile(PINNED_EXEMPLARS_PATH, `${JSON.stringify(entries, null, 2)}\n`, "utf-8");
+}
+
 async function selectExemplars(prompt, max = 3) {
+  const family = detectPromptFamily(prompt);
+  const pinned = await readPinnedExemplars();
   const logs = await readRunLog(800);
   const candidates = logs
     .filter((entry) => entry.type === "generate_result")
@@ -514,13 +583,23 @@ async function selectExemplars(prompt, max = 3) {
       prompt: entry.prompt,
       program: entry.program,
       score: scorePromptSimilarity(prompt, entry.prompt),
+      source: "history",
     }))
     .filter((entry) => entry.score > 0)
     .sort((a, b) => b.score - a.score);
 
+  const pinnedCandidates = pinned
+    .filter((entry) => entry.family === family)
+    .map((entry) => ({
+      prompt: entry.prompt,
+      program: entry.program,
+      score: 1.1,
+      source: "pinned",
+    }));
+
   const seen = new Set();
   const picked = [];
-  for (const item of candidates) {
+  for (const item of [...pinnedCandidates, ...candidates]) {
     if (seen.has(item.program)) continue;
     seen.add(item.program);
     picked.push(item);
@@ -701,118 +780,131 @@ function buildValidatorReport({
   };
 }
 
-async function handleGenerate(req, res) {
-  try {
-    const body = JSON.parse(await readBody(req));
-    const prompt = String(body.prompt || "").trim();
-    const code = String(body.code || "");
+async function runGenerationPipeline(prompt, code, { writeLogs = true } = {}) {
+  const intent = detectPromptIntent(prompt);
+  const family = detectPromptFamily(prompt);
+  const exemplars = await selectExemplars(prompt, 3);
+  const exemplarSources = exemplars.map((e) => String(e.source || "history"));
 
-    if (!prompt) {
-      json(res, 400, { error: "Prompt is required." });
-      return;
-    }
+  const initial = await callOpenAI(structuredPrompt(prompt, code, exemplars));
+  const initialProgram = extractProgramFromOperations(initial?.operations);
+  const typoNormalizedInitialProgram = normalizeCommonTypos(initialProgram);
+  const rewrittenInitial = rewriteUnsupportedBuiltins(typoNormalizedInitialProgram);
+  const normalizedInitialProgram = rewrittenInitial.program;
+  const initialLint = initialProgram ? lintBasicV2(initialProgram) : ["No replace_file program found."];
+  const normalizedInitialLint = normalizedInitialProgram
+    ? lintBasicV2(normalizedInitialProgram)
+    : ["No replace_file program found."];
 
-    const exemplars = await selectExemplars(prompt, 3);
-    const initial = await callOpenAI(structuredPrompt(prompt, code, exemplars));
-    const initialProgram = extractProgramFromOperations(initial?.operations);
-    const typoNormalizedInitialProgram = normalizeCommonTypos(initialProgram);
-    const rewrittenInitial = rewriteUnsupportedBuiltins(typoNormalizedInitialProgram);
-    const normalizedInitialProgram = rewrittenInitial.program;
-    const initialLint = initialProgram ? lintBasicV2(initialProgram) : ["No replace_file program found."];
-    const normalizedInitialLint = normalizedInitialProgram
-      ? lintBasicV2(normalizedInitialProgram)
-      : ["No replace_file program found."];
-
-    if (normalizedInitialProgram && looksLikeBasicV2(normalizedInitialProgram) && normalizedInitialLint.length === 0) {
+  if (normalizedInitialProgram && looksLikeBasicV2(normalizedInitialProgram) && normalizedInitialLint.length === 0) {
+    const payload = {
+      rationale:
+        normalizedInitialProgram !== initialProgram
+          ? `${initial.rationale} (auto-corrected BASIC syntax and unsupported built-ins)`
+          : initial.rationale,
+      operations: withProgramContent(initial.operations, normalizedInitialProgram),
+      validator_report: buildValidatorReport({
+        status: "accepted",
+        strategy: "model",
+        exemplarsUsed: exemplars.length,
+        normalizedChanged: normalizedInitialProgram !== initialProgram,
+        initialIssues: [...initialLint, ...rewrittenInitial.notes],
+        finalIssues: normalizedInitialLint,
+      }),
+    };
+    if (writeLogs) {
       await appendRunLog({
         type: "generate_result",
         prompt,
+        intent,
+        family,
         strategy: "model",
         validation: "accepted",
         program: normalizedInitialProgram,
+        initial_issues: [...initialLint, ...rewrittenInitial.notes],
+        final_issues: normalizedInitialLint,
         lint_initial_count: initialLint.length,
         lint_final_count: normalizedInitialLint.length,
         normalized_changed: normalizedInitialProgram !== initialProgram,
         exemplars_used: exemplars.length,
+        exemplar_sources: exemplarSources,
       });
-      json(res, 200, {
-        rationale:
-          normalizedInitialProgram !== initialProgram
-            ? `${initial.rationale} (auto-corrected BASIC syntax and unsupported built-ins)`
-            : initial.rationale,
-        operations: withProgramContent(initial.operations, normalizedInitialProgram),
-        validator_report: buildValidatorReport({
-          status: "accepted",
-          strategy: "model",
-          exemplarsUsed: exemplars.length,
-          normalizedChanged: normalizedInitialProgram !== initialProgram,
-          initialIssues: [...initialLint, ...rewrittenInitial.notes],
-          finalIssues: normalizedInitialLint,
-        }),
-      });
-      return;
     }
+    return { statusCode: 200, payload };
+  }
 
-    if (initialProgram) {
-      try {
-        const repaired = await callOpenAI(repairPrompt(prompt, initialProgram, code, initialLint));
-        const repairedProgram = extractProgramFromOperations(repaired?.operations);
-        const typoNormalizedRepairedProgram = normalizeCommonTypos(repairedProgram);
-        const rewrittenRepaired = rewriteUnsupportedBuiltins(typoNormalizedRepairedProgram);
-        const normalizedRepairedProgram = rewrittenRepaired.program;
-        const repairedLint = repairedProgram ? lintBasicV2(repairedProgram) : ["No replace_file program found."];
-        const normalizedRepairedLint = normalizedRepairedProgram
-          ? lintBasicV2(normalizedRepairedProgram)
-          : ["No replace_file program found."];
-        if (
-          normalizedRepairedProgram &&
-          looksLikeBasicV2(normalizedRepairedProgram) &&
-          normalizedRepairedLint.length === 0
-        ) {
+  if (initialProgram) {
+    try {
+      const repaired = await callOpenAI(repairPrompt(prompt, initialProgram, code, initialLint));
+      const repairedProgram = extractProgramFromOperations(repaired?.operations);
+      const typoNormalizedRepairedProgram = normalizeCommonTypos(repairedProgram);
+      const rewrittenRepaired = rewriteUnsupportedBuiltins(typoNormalizedRepairedProgram);
+      const normalizedRepairedProgram = rewrittenRepaired.program;
+      const repairedLint = repairedProgram ? lintBasicV2(repairedProgram) : ["No replace_file program found."];
+      const normalizedRepairedLint = normalizedRepairedProgram
+        ? lintBasicV2(normalizedRepairedProgram)
+        : ["No replace_file program found."];
+      if (normalizedRepairedProgram && looksLikeBasicV2(normalizedRepairedProgram) && normalizedRepairedLint.length === 0) {
+        const payload = {
+          rationale: `${repaired.rationale} (auto-repaired to valid C64 BASIC V2)`,
+          operations: withProgramContent(repaired.operations, normalizedRepairedProgram),
+          validator_report: buildValidatorReport({
+            status: "repaired",
+            strategy: "repair",
+            exemplarsUsed: exemplars.length,
+            normalizedChanged: normalizedRepairedProgram !== repairedProgram,
+            initialIssues: [...initialLint, ...rewrittenRepaired.notes],
+            finalIssues: normalizedRepairedLint,
+          }),
+        };
+        if (writeLogs) {
           await appendRunLog({
             type: "generate_result",
             prompt,
+            intent,
+            family,
             strategy: "repair",
             validation: "repaired",
             program: normalizedRepairedProgram,
+            initial_issues: [...initialLint, ...rewrittenRepaired.notes],
+            final_issues: normalizedRepairedLint,
             lint_initial_count: repairedLint.length,
             lint_final_count: normalizedRepairedLint.length,
             normalized_changed: normalizedRepairedProgram !== repairedProgram,
             exemplars_used: exemplars.length,
+            exemplar_sources: exemplarSources,
           });
-          json(res, 200, {
-            rationale: `${repaired.rationale} (auto-repaired to valid C64 BASIC V2)`,
-            operations: withProgramContent(repaired.operations, normalizedRepairedProgram),
-            validator_report: buildValidatorReport({
-              status: "repaired",
-              strategy: "repair",
-              exemplarsUsed: exemplars.length,
-              normalizedChanged: normalizedRepairedProgram !== repairedProgram,
-              initialIssues: [...initialLint, ...rewrittenRepaired.notes],
-              finalIssues: normalizedRepairedLint,
-            }),
-          });
-          return;
         }
-      } catch {
-        // fall through to deterministic fallback below
+        return { statusCode: 200, payload };
       }
+    } catch {
+      // fall through to deterministic fallback
     }
+  }
 
-    const fallback = fallbackProgramForPrompt(prompt);
+  const fallback = fallbackProgramForPrompt(prompt);
+  if (writeLogs) {
     await appendRunLog({
       type: "generate_result",
       prompt,
+      intent,
+      family,
       strategy: "fallback",
       validation: "fallback",
       program: extractProgramFromOperations(fallback.operations),
       lint: initialLint,
+      initial_issues: initialLint,
+      final_issues: [],
       lint_initial_count: initialLint.length,
       lint_final_count: 0,
       normalized_changed: false,
       exemplars_used: exemplars.length,
+      exemplar_sources: exemplarSources,
     });
-    json(res, 200, {
+  }
+  return {
+    statusCode: 200,
+    payload: {
       ...fallback,
       validator_report: buildValidatorReport({
         status: "fallback",
@@ -823,11 +915,44 @@ async function handleGenerate(req, res) {
         finalIssues: [],
         fallbackReason: "model_or_repair_failed_validation",
       }),
-    });
+    },
+  };
+}
+
+function heuristicJudge(prompt, program) {
+  const p = tokenizePrompt(prompt);
+  const code = String(program || "").toLowerCase();
+  let overlap = 0;
+  for (const token of p) {
+    if (code.includes(token)) overlap += 1;
+  }
+  const lint = lintBasicV2(program || "");
+  const score = Math.max(0, Math.min(1, (overlap / Math.max(1, p.size)) * 0.6 + (lint.length === 0 ? 0.4 : 0.1)));
+  return {
+    verdict: score >= 0.65 ? "pass" : "needs_review",
+    score: Number(score.toFixed(2)),
+    notes: lint.length ? [`lint: ${lint.slice(0, 3).join(" | ")}`] : ["Heuristic pass: prompt-token overlap + clean lint."],
+    mode: "heuristic",
+  };
+}
+
+async function handleGenerate(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const prompt = String(body.prompt || "").trim();
+    const code = String(body.code || "");
+    if (!prompt) {
+      json(res, 400, { error: "Prompt is required." });
+      return;
+    }
+    const result = await runGenerationPipeline(prompt, code, { writeLogs: true });
+    json(res, result.statusCode, result.payload);
   } catch (error) {
     await appendRunLog({
       type: "generate_result",
       prompt: "unknown",
+      intent: "unknown",
+      family: "unknown",
       strategy: "error",
       validation: "error",
       error: error.message || "Model generation failed.",
@@ -878,6 +1003,80 @@ async function handleRunEvent(req, res) {
   }
 }
 
+async function handleGetPinnedExemplars(_req, res) {
+  const pinned = await readPinnedExemplars();
+  json(res, 200, { exemplars: pinned });
+}
+
+async function handleSetPinnedExemplar(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const family = String(body.family || "").trim() || "general:generic";
+    const prompt = String(body.prompt || "").trim();
+    const program = String(body.program || "");
+    const pinned = Boolean(body.pinned);
+
+    let all = await readPinnedExemplars();
+    all = all.filter((entry) => !(entry.family === family && entry.prompt === prompt));
+
+    if (pinned && prompt && program.trim()) {
+      all.unshift({
+        family,
+        prompt,
+        program,
+        pinned_at: new Date().toISOString(),
+      });
+    }
+
+    if (all.length > 200) all = all.slice(0, 200);
+    await writePinnedExemplars(all);
+    json(res, 200, { ok: true, exemplars: all });
+  } catch (error) {
+    json(res, 500, { error: error.message || "Failed to update pinned exemplars." });
+  }
+}
+
+async function handleReplay(req, res) {
+  try {
+    const body = JSON.parse(await readBody(req));
+    const prompt = String(body.prompt || "").trim();
+    const code = String(body.code || "");
+    const judge = Boolean(body.judge);
+    if (!prompt) {
+      json(res, 400, { error: "Prompt is required." });
+      return;
+    }
+
+    const result = await runGenerationPipeline(prompt, code, { writeLogs: false });
+    const generatedProgram = extractProgramFromOperations(result.payload?.operations || []);
+    const judgement = judge ? heuristicJudge(prompt, generatedProgram) : null;
+
+    await appendRunLog({
+      type: "replay_event",
+      prompt,
+      outcome: "ok",
+      validation: result.payload?.validator_report?.status || "unknown",
+      judged: Boolean(judge),
+      judge_verdict: judgement?.verdict || "",
+      judge_score: judgement?.score || 0,
+    });
+
+    json(res, 200, {
+      ...result.payload,
+      replay: true,
+      judge: judgement,
+    });
+  } catch (error) {
+    await appendRunLog({
+      type: "replay_event",
+      prompt: "unknown",
+      outcome: "error",
+      error: error.message || "replay failed",
+    });
+    json(res, 500, { error: error.message || "Replay failed." });
+  }
+}
+
 async function handleMetrics(_req, res) {
   const logs = await readRunLog(2000);
   const gen = logs.filter((e) => e.type === "generate_result");
@@ -903,17 +1102,80 @@ async function handleMetricsDetail(_req, res) {
   const logs = await readRunLog(4000);
   const gen = logs.filter((e) => e.type === "generate_result");
   const runs = logs.filter((e) => e.type === "run_event");
+  const replays = logs.filter((e) => e.type === "replay_event");
+  const pinned = await readPinnedExemplars();
 
   const byValidation = {};
   const byStrategy = {};
   const lintHistogram = new Map();
+  const statementHeatmap = new Map();
+  const intentStats = {};
+
+  const statementBuckets = [
+    ["IF", /\bIF\b/],
+    ["FOR", /\bFOR\b/],
+    ["PRINT", /\bPRINT\b/],
+    ["INPUT", /\bINPUT\b/],
+    ["GOTO", /\bGOTO\b/],
+    ["GOSUB", /\bGOSUB\b/],
+    ["POKE", /\bPOKE\b/],
+    ["STRING$", /\bSTRING\$/],
+    ["SPACE$", /\bSPACE\$|\bSPACES\$/],
+  ];
+
+  const scoreWindow = (days) => {
+    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+    const rows = gen.filter((row) => Date.parse(row.ts || "") >= cutoff);
+    const total = rows.length;
+    const accepted = rows.filter((r) => r.validation === "accepted").length;
+    const repaired = rows.filter((r) => r.validation === "repaired").length;
+    const fallback = rows.filter((r) => r.validation === "fallback").length;
+    return {
+      total,
+      first_pass_accept_rate: total ? Number(((accepted / total) * 100).toFixed(2)) : 0,
+      repair_success_rate: total ? Number(((repaired / total) * 100).toFixed(2)) : 0,
+      fallback_rate: total ? Number(((fallback / total) * 100).toFixed(2)) : 0,
+      success_rate: total ? Number((((accepted + repaired) / total) * 100).toFixed(2)) : 0,
+      avg_lint_initial: total
+        ? Number((rows.reduce((sum, r) => sum + Number(r.lint_initial_count || 0), 0) / total).toFixed(2))
+        : 0,
+      avg_lint_final: total
+        ? Number((rows.reduce((sum, r) => sum + Number(r.lint_final_count || 0), 0) / total).toFixed(2))
+        : 0,
+    };
+  };
 
   for (const item of gen) {
     byValidation[item.validation || "unknown"] = (byValidation[item.validation || "unknown"] || 0) + 1;
     byStrategy[item.strategy || "unknown"] = (byStrategy[item.strategy || "unknown"] || 0) + 1;
-    const lintList = Array.isArray(item.lint) ? item.lint : [];
+    const lintList = Array.isArray(item.initial_issues)
+      ? item.initial_issues
+      : Array.isArray(item.lint)
+        ? item.lint
+        : [];
+
+    const intent = String(item.intent || detectPromptIntent(item.prompt || ""));
+    if (!intentStats[intent]) {
+      intentStats[intent] = { total: 0, success: 0, fallback: 0 };
+    }
+    intentStats[intent].total += 1;
+    if (item.validation === "accepted" || item.validation === "repaired") intentStats[intent].success += 1;
+    if (item.validation === "fallback") intentStats[intent].fallback += 1;
+
     for (const finding of lintList) {
       lintHistogram.set(finding, (lintHistogram.get(finding) || 0) + 1);
+      const upper = String(finding || "").toUpperCase();
+      let bucketHit = false;
+      for (const [label, rx] of statementBuckets) {
+        if (rx.test(upper)) {
+          statementHeatmap.set(label, (statementHeatmap.get(label) || 0) + 1);
+          bucketHit = true;
+          break;
+        }
+      }
+      if (!bucketHit) {
+        statementHeatmap.set("OTHER", (statementHeatmap.get("OTHER") || 0) + 1);
+      }
     }
   }
 
@@ -926,6 +1188,8 @@ async function handleMetricsDetail(_req, res) {
     lint_final_count: Number(item.lint_final_count || 0),
     normalized_changed: Boolean(item.normalized_changed),
     exemplars_used: Number(item.exemplars_used || 0),
+    intent: String(item.intent || detectPromptIntent(item.prompt || "")),
+    family: String(item.family || detectPromptFamily(item.prompt || "")),
   }));
 
   const topLintFindings = Array.from(lintHistogram.entries())
@@ -939,16 +1203,105 @@ async function handleMetricsDetail(_req, res) {
     runOutcome[key] = (runOutcome[key] || 0) + 1;
   }
 
+  const funnel = {
+    total_generations: gen.length,
+    accepted_first_pass: gen.filter((g) => g.validation === "accepted" && g.strategy === "model").length,
+    repaired_success: gen.filter((g) => g.validation === "repaired").length,
+    fallback: gen.filter((g) => g.validation === "fallback").length,
+    error: gen.filter((g) => g.validation === "error").length,
+  };
+
+  const withEx = gen.filter((g) => Number(g.exemplars_used || 0) > 0);
+  const withoutEx = gen.filter((g) => Number(g.exemplars_used || 0) === 0);
+  const impact = (rows) => {
+    const total = rows.length;
+    const success = rows.filter((r) => r.validation === "accepted" || r.validation === "repaired").length;
+    const fallback = rows.filter((r) => r.validation === "fallback").length;
+    return {
+      total,
+      success_rate: total ? Number(((success / total) * 100).toFixed(2)) : 0,
+      fallback_rate: total ? Number(((fallback / total) * 100).toFixed(2)) : 0,
+    };
+  };
+
+  const recent = gen.slice(-50);
+  const baseline = gen.slice(Math.max(0, gen.length - 250), Math.max(0, gen.length - 50));
+  const rate = (rows, key) => {
+    if (!rows.length) return 0;
+    return rows.filter((r) => r.validation === key).length / rows.length;
+  };
+  const recentFallbackRate = rate(recent, "fallback");
+  const baselineFallbackRate = rate(baseline, "fallback");
+  const driftAlerts = [];
+  if (recent.length >= 20 && baseline.length >= 20 && recentFallbackRate > baselineFallbackRate * 1.4 + 0.05) {
+    driftAlerts.push(
+      `Fallback rate spike: recent ${(recentFallbackRate * 100).toFixed(1)}% vs baseline ${(baselineFallbackRate * 100).toFixed(1)}%`
+    );
+  }
+
+  const intentClusters = Object.entries(intentStats)
+    .map(([intent, stats]) => ({
+      intent,
+      total: stats.total,
+      success_rate: stats.total ? Number(((stats.success / stats.total) * 100).toFixed(2)) : 0,
+      fallback_rate: stats.total ? Number(((stats.fallback / stats.total) * 100).toFixed(2)) : 0,
+    }))
+    .sort((a, b) => b.total - a.total);
+
+  const exemplarLibrary = gen
+    .filter((g) => g.validation === "accepted" || g.validation === "repaired")
+    .filter((g) => typeof g.program === "string" && g.program.trim())
+    .slice(-120)
+    .reverse()
+    .map((g, idx) => ({
+      id: `${Date.parse(g.ts || "") || 0}-${idx}`,
+      ts: g.ts,
+      prompt: String(g.prompt || "").slice(0, 220),
+      family: String(g.family || detectPromptFamily(g.prompt || "")),
+      strategy: g.strategy || "unknown",
+      validation: g.validation || "unknown",
+      lint_initial_count: Number(g.lint_initial_count || 0),
+      lint_final_count: Number(g.lint_final_count || 0),
+      program: g.program,
+      exemplar_sources: Array.isArray(g.exemplar_sources) ? g.exemplar_sources : [],
+    }));
+
   json(res, 200, {
     totals: {
       generations: gen.length,
       runs: runs.length,
+      replays: replays.length,
+      pinned_exemplars: pinned.length,
     },
     by_validation: byValidation,
     by_strategy: byStrategy,
     run_outcome: runOutcome,
     recent_generations: recentGenerations,
     top_lint_findings: topLintFindings,
+    validator_heatmap: Array.from(statementHeatmap.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([statement, count]) => ({ statement, count })),
+    repair_funnel: funnel,
+    scorecards: {
+      days_7: scoreWindow(7),
+      days_30: scoreWindow(30),
+    },
+    intent_clusters: intentClusters,
+    exemplar_impact: {
+      with_exemplars: impact(withEx),
+      without_exemplars: impact(withoutEx),
+    },
+    drift: {
+      alerts: driftAlerts,
+      recent_fallback_rate: Number((recentFallbackRate * 100).toFixed(2)),
+      baseline_fallback_rate: Number((baselineFallbackRate * 100).toFixed(2)),
+    },
+    exemplar_library: exemplarLibrary,
+    replay_stats: {
+      total: replays.length,
+      ok: replays.filter((r) => r.outcome === "ok").length,
+      errors: replays.filter((r) => r.outcome === "error").length,
+    },
   });
 }
 
@@ -989,6 +1342,21 @@ const server = createServer(async (req, res) => {
 
   if (req.method === "POST" && url.pathname === "/api/run-event") {
     await handleRunEvent(req, res);
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/exemplars/pinned") {
+    await handleGetPinnedExemplars(req, res);
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/exemplars/pinned") {
+    await handleSetPinnedExemplar(req, res);
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/replay") {
+    await handleReplay(req, res);
     return;
   }
 
