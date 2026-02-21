@@ -249,6 +249,79 @@ function rewriteUnsupportedBuiltins(program) {
   };
 }
 
+function autoDimensionArrays(program) {
+  const parsed = String(program || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((raw) => {
+      const m = raw.match(/^(\d+)\s+(.*)$/);
+      if (!m) return null;
+      return { lineNo: Number(m[1]), code: m[2] };
+    })
+    .filter(Boolean);
+
+  if (!parsed.length) return { program: String(program || ""), notes: [] };
+
+  const dimmed = new Set();
+  const loopTos = new Map();
+  const arrayUses = [];
+
+  for (const line of parsed) {
+    const codeNoStrings = line.code.replace(/"[^"]*"/g, "");
+    const dimMatch = codeNoStrings.match(/\bDIM\b\s+(.+)$/i);
+    if (dimMatch) {
+      for (const part of dimMatch[1].split(",")) {
+        const arr = part.trim().match(/^([A-Z][A-Z0-9]*)\s*\(/i)?.[1];
+        if (arr) dimmed.add(arr.toUpperCase());
+      }
+    }
+
+    const forMatch = codeNoStrings.match(/\bFOR\s+([A-Z][A-Z0-9]*)\s*=\s*.+?\bTO\b\s*([0-9]+)/i);
+    if (forMatch) {
+      const key = forMatch[1].toUpperCase();
+      const n = Number(forMatch[2]);
+      if (Number.isFinite(n)) loopTos.set(key, Math.max(loopTos.get(key) || 0, n));
+    }
+
+    const useRx = /\b([A-Z][A-Z0-9]*)\s*\(\s*([A-Z][A-Z0-9]*|\d+)/gi;
+    let u;
+    while ((u = useRx.exec(codeNoStrings))) {
+      const arr = u[1].toUpperCase();
+      const idx = u[2].toUpperCase();
+      if (arr === "FN") continue;
+      arrayUses.push({ arr, idx });
+    }
+  }
+
+  const inferred = new Map();
+  for (const use of arrayUses) {
+    if (dimmed.has(use.arr)) continue;
+    let size = 40;
+    if (/^\d+$/.test(use.idx)) size = Math.max(12, Number(use.idx) + 2);
+    if (loopTos.has(use.idx)) size = Math.max(12, Number(loopTos.get(use.idx)) + 2);
+    inferred.set(use.arr, Math.max(inferred.get(use.arr) || 0, size));
+  }
+
+  if (!inferred.size) return { program: String(program || ""), notes: [] };
+
+  const usedLineNos = new Set(parsed.map((x) => x.lineNo));
+  let insertLine = parsed[0].lineNo + 1;
+  while (usedLineNos.has(insertLine)) insertLine += 1;
+
+  const dimParts = Array.from(inferred.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([name, n]) => `${name}(${n})`);
+
+  const merged = [...parsed, { lineNo: insertLine, code: `DIM ${dimParts.join(",")}` }].sort(
+    (a, b) => a.lineNo - b.lineNo
+  );
+  return {
+    program: merged.map((x) => `${x.lineNo} ${x.code}`).join("\n"),
+    notes: [`Inserted ${insertLine} DIM ${dimParts.join(",")} for inferred array usage.`],
+  };
+}
+
 function withProgramContent(operations, program) {
   if (!Array.isArray(operations)) return operations;
   return operations.map((op) => {
@@ -269,6 +342,8 @@ function lintBasicV2(program) {
   let previousLine = -1;
   const lineNumbers = new Set();
   const lineBodies = [];
+  const dimmedArrays = new Set();
+  const usedArrays = new Map();
   for (const rawLine of lines) {
     const lineMatch = rawLine.match(/^(\d+)\s+(.*)$/);
     if (!lineMatch) {
@@ -280,6 +355,14 @@ function lintBasicV2(program) {
     const code = lineMatch[2];
     lineNumbers.add(lineNo);
     lineBodies.push({ lineNo, code });
+    const codeNoStrings = code.replace(/"[^"]*"/g, "");
+    const dimMatch = codeNoStrings.match(/\bDIM\b\s+(.+)$/i);
+    if (dimMatch) {
+      for (const part of dimMatch[1].split(",")) {
+        const arr = part.trim().match(/^([A-Z][A-Z0-9]*)\s*\(/i)?.[1];
+        if (arr) dimmedArrays.add(arr.toUpperCase());
+      }
+    }
 
     if (lineNo <= previousLine) {
       findings.push(`Line numbers must increase (saw ${lineNo} after ${previousLine}).`);
@@ -291,7 +374,6 @@ function lintBasicV2(program) {
       findings.push(`Line ${lineNo}: unmatched quote.`);
     }
 
-    const codeNoStrings = code.replace(/"[^"]*"/g, "");
     const openParens = (codeNoStrings.match(/\(/g) || []).length;
     const closeParens = (codeNoStrings.match(/\)/g) || []).length;
     if (openParens !== closeParens) {
@@ -301,6 +383,14 @@ function lintBasicV2(program) {
     for (const stmt of splitStatements(code)) {
       const upper = stmt.toUpperCase();
       const stmtNoStrings = stmt.replace(/"[^"]*"/g, "");
+      const arrRx = /\b([A-Z][A-Z0-9]*)\s*\(/gi;
+      let arrMatch;
+      while ((arrMatch = arrRx.exec(stmtNoStrings))) {
+        const arrName = arrMatch[1].toUpperCase();
+        if (arrName !== "FN" && !usedArrays.has(arrName)) {
+          usedArrays.set(arrName, lineNo);
+        }
+      }
 
       if (upper.includes("==")) {
         findings.push(`Line ${lineNo}: use '=' (not '==').`);
@@ -359,6 +449,12 @@ function lintBasicV2(program) {
       if (ifThenLine && !lineNumbers.has(Number(ifThenLine[1]))) {
         findings.push(`Line ${lineNo}: IF THEN target ${ifThenLine[1]} not found.`);
       }
+    }
+  }
+
+  for (const [arrName, firstLine] of usedArrays.entries()) {
+    if (!dimmedArrays.has(arrName)) {
+      findings.push(`Line ${firstLine}: array ${arrName}() used without DIM.`);
     }
   }
 
@@ -428,7 +524,8 @@ function fallbackProgramForPrompt(prompt) {
           op: "replace_file",
           path: "program.bas",
           content: `10 POKE 53280,0:POKE 53281,0
-20 FOR I=1 TO 20:X(I)=INT(RND(1)*40):Y(I)=INT(RND(1)*24):NEXT I
+20 DIM X(22),Y(22)
+25 FOR I=1 TO 20:X(I)=INT(RND(1)*40):Y(I)=INT(RND(1)*24):NEXT I
 30 FOR I=1 TO 20:POKE 1024+Y(I)*40+X(I),46:NEXT I
 40 FOR T=1 TO 120:NEXT T
 50 FOR I=1 TO 20:POKE 1024+Y(I)*40+X(I),32:Y(I)=Y(I)+1:IF Y(I)>23 THEN Y(I)=0:X(I)=INT(RND(1)*40)
@@ -642,6 +739,7 @@ function structuredPrompt(userPrompt, currentCode, exemplars = []) {
     "For moving objects, use C64 screen memory POKE at 1024 + row*40 + col and erase with 32.",
     "Strict C64 BASIC V2 only. Do NOT use ELSE/ELSEIF/ENDIF/WHILE/WEND/DO/LOOP/TRUE/FALSE.",
     "Do NOT use STRING$, SPACE$, or SPACES$ (not in C64 BASIC V2).",
+    "If using arrays like A(I), include DIM A(n) before first use.",
     "For spaces, use PRINT SPC(n); and for repeated chars use FOR...NEXT with PRINT \"x\";.",
     "Use IF ... THEN with either a line number or inline statement(s) separated by ':'.",
     "Use ASCII quotes only (\").",
@@ -668,6 +766,7 @@ function repairPrompt(userPrompt, brokenProgram, currentCode, lintFindings = [])
     "- numbered lines only",
     "- no ELSE/ELSEIF/ENDIF/WHILE/WEND/TRUE/FALSE/DO/LOOP",
     "- no STRING$/SPACE$/SPACES$",
+    "- include DIM for arrays before use",
     "- use SPC() and FOR...NEXT for repeat rendering",
     "- keep intent from the user prompt",
     "- keep it runnable and concise",
@@ -790,7 +889,8 @@ async function runGenerationPipeline(prompt, code, { writeLogs = true } = {}) {
   const initialProgram = extractProgramFromOperations(initial?.operations);
   const typoNormalizedInitialProgram = normalizeCommonTypos(initialProgram);
   const rewrittenInitial = rewriteUnsupportedBuiltins(typoNormalizedInitialProgram);
-  const normalizedInitialProgram = rewrittenInitial.program;
+  const autoDimInitial = autoDimensionArrays(rewrittenInitial.program);
+  const normalizedInitialProgram = autoDimInitial.program;
   const initialLint = initialProgram ? lintBasicV2(initialProgram) : ["No replace_file program found."];
   const normalizedInitialLint = normalizedInitialProgram
     ? lintBasicV2(normalizedInitialProgram)
@@ -808,7 +908,7 @@ async function runGenerationPipeline(prompt, code, { writeLogs = true } = {}) {
         strategy: "model",
         exemplarsUsed: exemplars.length,
         normalizedChanged: normalizedInitialProgram !== initialProgram,
-        initialIssues: [...initialLint, ...rewrittenInitial.notes],
+        initialIssues: [...initialLint, ...rewrittenInitial.notes, ...autoDimInitial.notes],
         finalIssues: normalizedInitialLint,
       }),
     };
@@ -821,7 +921,7 @@ async function runGenerationPipeline(prompt, code, { writeLogs = true } = {}) {
         strategy: "model",
         validation: "accepted",
         program: normalizedInitialProgram,
-        initial_issues: [...initialLint, ...rewrittenInitial.notes],
+        initial_issues: [...initialLint, ...rewrittenInitial.notes, ...autoDimInitial.notes],
         final_issues: normalizedInitialLint,
         lint_initial_count: initialLint.length,
         lint_final_count: normalizedInitialLint.length,
@@ -839,7 +939,8 @@ async function runGenerationPipeline(prompt, code, { writeLogs = true } = {}) {
       const repairedProgram = extractProgramFromOperations(repaired?.operations);
       const typoNormalizedRepairedProgram = normalizeCommonTypos(repairedProgram);
       const rewrittenRepaired = rewriteUnsupportedBuiltins(typoNormalizedRepairedProgram);
-      const normalizedRepairedProgram = rewrittenRepaired.program;
+      const autoDimRepaired = autoDimensionArrays(rewrittenRepaired.program);
+      const normalizedRepairedProgram = autoDimRepaired.program;
       const repairedLint = repairedProgram ? lintBasicV2(repairedProgram) : ["No replace_file program found."];
       const normalizedRepairedLint = normalizedRepairedProgram
         ? lintBasicV2(normalizedRepairedProgram)
@@ -853,7 +954,7 @@ async function runGenerationPipeline(prompt, code, { writeLogs = true } = {}) {
             strategy: "repair",
             exemplarsUsed: exemplars.length,
             normalizedChanged: normalizedRepairedProgram !== repairedProgram,
-            initialIssues: [...initialLint, ...rewrittenRepaired.notes],
+            initialIssues: [...initialLint, ...rewrittenRepaired.notes, ...autoDimRepaired.notes],
             finalIssues: normalizedRepairedLint,
           }),
         };
@@ -866,7 +967,7 @@ async function runGenerationPipeline(prompt, code, { writeLogs = true } = {}) {
             strategy: "repair",
             validation: "repaired",
             program: normalizedRepairedProgram,
-            initial_issues: [...initialLint, ...rewrittenRepaired.notes],
+            initial_issues: [...initialLint, ...rewrittenRepaired.notes, ...autoDimRepaired.notes],
             final_issues: normalizedRepairedLint,
             lint_initial_count: repairedLint.length,
             lint_final_count: normalizedRepairedLint.length,
