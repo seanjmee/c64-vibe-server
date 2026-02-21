@@ -183,6 +183,71 @@ function normalizeCommonTypos(program) {
   return normalized;
 }
 
+function chooseLoopVar(stmtUpper) {
+  const candidates = ["ZZ", "QZ", "J9", "K9"];
+  for (const candidate of candidates) {
+    if (!new RegExp(`\\b${candidate}\\b`).test(stmtUpper)) return candidate;
+  }
+  return "ZZ";
+}
+
+function rewriteUnsupportedBuiltins(program) {
+  const lines = String(program || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const notes = [];
+  const rewrittenLines = lines.map((rawLine) => {
+    const lineMatch = rawLine.match(/^(\d+)\s+(.*)$/);
+    if (!lineMatch) return rawLine;
+
+    const lineNo = lineMatch[1];
+    const code = lineMatch[2];
+    const statements = splitStatements(code);
+    const rewrittenStatements = statements.map((stmt) => {
+      let updated = stmt;
+
+      // C64 BASIC uses SPC() in PRINT context, not SPACE$/SPACES$ string functions.
+      const spacePattern = /\bSPACES?\$\s*\(\s*([^)]+)\)/gi;
+      if (spacePattern.test(updated)) {
+        updated = updated.replace(spacePattern, "SPC($1)");
+        notes.push(`Line ${lineNo}: rewrote SPACE$/SPACES$ to SPC().`);
+      }
+
+      // Rewrite common PRINT ... STRING$(N,"X") pattern into C64-safe looped output.
+      const printMatch = updated.match(/^PRINT\s+(.+)$/i);
+      if (printMatch && /\bSTRING\$\s*\(/i.test(printMatch[1])) {
+        const rendered = printMatch[1].match(
+          /^(.*?)(?:;\s*)?STRING\$\(\s*([^,]+)\s*,\s*"([^"]*)"\s*\)\s*(;?)\s*$/i
+        );
+        if (rendered) {
+          const prefix = rendered[1].trim();
+          const countExpr = rendered[2].trim();
+          const repeatText = rendered[3].length > 0 ? rendered[3] : " ";
+          const repeatChar = repeatText[0] || " ";
+          const trailingSemi = rendered[4] === ";";
+          const loopVar = chooseLoopVar(updated.toUpperCase());
+          const prefixPart = prefix ? `PRINT ${prefix};:` : "";
+          const loopPart = `FOR ${loopVar}=1 TO ${countExpr}:PRINT "${repeatChar}";:NEXT ${loopVar}`;
+          const tailPart = trailingSemi ? "" : ":PRINT";
+          updated = `${prefixPart}${loopPart}${tailPart}`;
+          notes.push(`Line ${lineNo}: rewrote STRING$() to looped PRINT output.`);
+        }
+      }
+
+      return updated;
+    });
+
+    return `${lineNo} ${rewrittenStatements.join(":")}`;
+  });
+
+  return {
+    program: rewrittenLines.join("\n"),
+    notes,
+  };
+}
+
 function withProgramContent(operations, program) {
   if (!Array.isArray(operations)) return operations;
   return operations.map((op) => {
@@ -241,6 +306,12 @@ function lintBasicV2(program) {
       }
       if (/\bWHILE\b|\bWEND\b|\bTRUE\b|\bFALSE\b|\bDO\b|\bLOOP\b|\bELSE\b/.test(upper)) {
         findings.push(`Line ${lineNo}: non-BASIC-V2 control syntax detected.`);
+      }
+      if (/\bSTRING\$\s*\(/.test(upper)) {
+        findings.push(`Line ${lineNo}: STRING$ is not available in C64 BASIC V2.`);
+      }
+      if (/\bSPACE\$?\s*\(/.test(upper) || /\bSPACES\$\s*\(/.test(upper)) {
+        findings.push(`Line ${lineNo}: use SPC(n) in PRINT, not SPACE$/SPACES$.`);
       }
       if (/^\s*IF\b/.test(upper) && !/\bTHEN\b/.test(upper)) {
         findings.push(`Line ${lineNo}: IF without THEN.`);
@@ -491,6 +562,8 @@ function structuredPrompt(userPrompt, currentCode, exemplars = []) {
     "When user asks for animation (bounce/ball/move), avoid static TAB+PRINT redraw loops.",
     "For moving objects, use C64 screen memory POKE at 1024 + row*40 + col and erase with 32.",
     "Strict C64 BASIC V2 only. Do NOT use ELSE/ELSEIF/ENDIF/WHILE/WEND/DO/LOOP/TRUE/FALSE.",
+    "Do NOT use STRING$, SPACE$, or SPACES$ (not in C64 BASIC V2).",
+    "For spaces, use PRINT SPC(n); and for repeated chars use FOR...NEXT with PRINT \"x\";.",
     "Use IF ... THEN with either a line number or inline statement(s) separated by ':'.",
     "Use ASCII quotes only (\").",
     "Provide runnable numbered BASIC only with ascending line numbers.",
@@ -515,6 +588,8 @@ function repairPrompt(userPrompt, brokenProgram, currentCode, lintFindings = [])
     "- strict C64 BASIC V2 only",
     "- numbered lines only",
     "- no ELSE/ELSEIF/ENDIF/WHILE/WEND/TRUE/FALSE/DO/LOOP",
+    "- no STRING$/SPACE$/SPACES$",
+    "- use SPC() and FOR...NEXT for repeat rendering",
     "- keep intent from the user prompt",
     "- keep it runnable and concise",
     `User prompt: ${userPrompt}`,
@@ -640,7 +715,9 @@ async function handleGenerate(req, res) {
     const exemplars = await selectExemplars(prompt, 3);
     const initial = await callOpenAI(structuredPrompt(prompt, code, exemplars));
     const initialProgram = extractProgramFromOperations(initial?.operations);
-    const normalizedInitialProgram = normalizeCommonTypos(initialProgram);
+    const typoNormalizedInitialProgram = normalizeCommonTypos(initialProgram);
+    const rewrittenInitial = rewriteUnsupportedBuiltins(typoNormalizedInitialProgram);
+    const normalizedInitialProgram = rewrittenInitial.program;
     const initialLint = initialProgram ? lintBasicV2(initialProgram) : ["No replace_file program found."];
     const normalizedInitialLint = normalizedInitialProgram
       ? lintBasicV2(normalizedInitialProgram)
@@ -661,7 +738,7 @@ async function handleGenerate(req, res) {
       json(res, 200, {
         rationale:
           normalizedInitialProgram !== initialProgram
-            ? `${initial.rationale} (auto-corrected common BASIC typos)`
+            ? `${initial.rationale} (auto-corrected BASIC syntax and unsupported built-ins)`
             : initial.rationale,
         operations: withProgramContent(initial.operations, normalizedInitialProgram),
         validator_report: buildValidatorReport({
@@ -669,7 +746,7 @@ async function handleGenerate(req, res) {
           strategy: "model",
           exemplarsUsed: exemplars.length,
           normalizedChanged: normalizedInitialProgram !== initialProgram,
-          initialIssues: initialLint,
+          initialIssues: [...initialLint, ...rewrittenInitial.notes],
           finalIssues: normalizedInitialLint,
         }),
       });
@@ -680,7 +757,9 @@ async function handleGenerate(req, res) {
       try {
         const repaired = await callOpenAI(repairPrompt(prompt, initialProgram, code, initialLint));
         const repairedProgram = extractProgramFromOperations(repaired?.operations);
-        const normalizedRepairedProgram = normalizeCommonTypos(repairedProgram);
+        const typoNormalizedRepairedProgram = normalizeCommonTypos(repairedProgram);
+        const rewrittenRepaired = rewriteUnsupportedBuiltins(typoNormalizedRepairedProgram);
+        const normalizedRepairedProgram = rewrittenRepaired.program;
         const repairedLint = repairedProgram ? lintBasicV2(repairedProgram) : ["No replace_file program found."];
         const normalizedRepairedLint = normalizedRepairedProgram
           ? lintBasicV2(normalizedRepairedProgram)
@@ -709,7 +788,7 @@ async function handleGenerate(req, res) {
               strategy: "repair",
               exemplarsUsed: exemplars.length,
               normalizedChanged: normalizedRepairedProgram !== repairedProgram,
-              initialIssues: initialLint,
+              initialIssues: [...initialLint, ...rewrittenRepaired.notes],
               finalIssues: normalizedRepairedLint,
             }),
           });
