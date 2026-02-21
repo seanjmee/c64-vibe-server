@@ -53,11 +53,62 @@ function evalExpression(token, vars) {
     return resolveAtom(expr, vars);
   }
   try {
-    const value = Function(`"use strict"; return (${expanded});`)();
+    const value = evalArithmeticExpression(expanded);
     return Number.isFinite(value) ? value : 0;
   } catch {
     return 0;
   }
+}
+
+function evalArithmeticExpression(source) {
+  const s = String(source || "").replace(/\s+/g, "");
+  const values = [];
+  const ops = [];
+  let i = 0;
+  const prec = { "+": 1, "-": 1, "*": 2, "/": 2 };
+
+  const applyTop = () => {
+    const op = ops.pop();
+    const b = Number(values.pop() ?? 0);
+    const a = Number(values.pop() ?? 0);
+    if (op === "+") values.push(a + b);
+    else if (op === "-") values.push(a - b);
+    else if (op === "*") values.push(a * b);
+    else if (op === "/") values.push(b === 0 ? 0 : a / b);
+  };
+
+  while (i < s.length) {
+    const ch = s[i];
+    if (ch === "(") {
+      ops.push(ch);
+      i += 1;
+      continue;
+    }
+    if (ch === ")") {
+      while (ops.length && ops[ops.length - 1] !== "(") applyTop();
+      if (ops[ops.length - 1] === "(") ops.pop();
+      i += 1;
+      continue;
+    }
+    if (/[+\-*/]/.test(ch)) {
+      // unary minus: treat as 0 - expr
+      if (ch === "-" && (i === 0 || s[i - 1] === "(" || /[+\-*/]/.test(s[i - 1]))) {
+        values.push(0);
+      }
+      while (ops.length && ops[ops.length - 1] !== "(" && prec[ops[ops.length - 1]] >= prec[ch]) applyTop();
+      ops.push(ch);
+      i += 1;
+      continue;
+    }
+
+    const m = s.slice(i).match(/^\d+(\.\d+)?/);
+    if (!m) throw new Error("invalid arithmetic expression");
+    values.push(Number(m[0]));
+    i += m[0].length;
+  }
+
+  while (ops.length) applyTop();
+  return Number(values.pop() ?? 0);
 }
 
 function evalCondition(expr, vars) {

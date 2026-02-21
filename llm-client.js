@@ -1,3 +1,8 @@
+function getApiHeaders() {
+  const key = localStorage.getItem("c64-vibe-api-key") || "";
+  return key ? { "x-c64-api-key": key } : {};
+}
+
 function normalizePatchPayload(payload) {
   if (!payload || typeof payload !== "object") {
     throw new Error("AI response was empty or invalid JSON.");
@@ -34,7 +39,7 @@ export function applyOperations(currentCode, operations) {
       const replacement = String(op.content || "");
       const lines = code.split(/\r?\n/);
       const prefix = lines.slice(0, Math.max(0, start - 1));
-      const suffix = lines.slice(Math.max(start - 1, end));
+      const suffix = lines.slice(Math.max(start, end));
       code = [...prefix, ...replacement.split(/\r?\n/), ...suffix].join("\n");
       continue;
     }
@@ -53,6 +58,7 @@ export async function requestAIPatch({ prompt, code, chatHistory }) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      ...getApiHeaders(),
     },
     body: JSON.stringify({ prompt, code, chatHistory }),
   });

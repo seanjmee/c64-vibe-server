@@ -35,6 +35,11 @@ const state = {
 
 let metricsTimer = null;
 
+function getApiHeaders() {
+  const key = localStorage.getItem("c64-vibe-api-key") || "";
+  return key ? { "x-c64-api-key": key } : {};
+}
+
 function nowText() {
   return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
@@ -167,7 +172,7 @@ async function postRunEvent(event, outcome, detail = "") {
     const lastUserPrompt = state.chat.filter((m) => m.role === "user").slice(-1)[0]?.message || "";
     await fetch("/api/run-event", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...getApiHeaders() },
       body: JSON.stringify({
         event,
         outcome,
@@ -213,7 +218,7 @@ async function syncEmbeddedEmulator() {
     const prgBytes = buildPrgBinary(dom.codeEditor.value);
     const response = await fetch("/api/prg", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...getApiHeaders() },
       body: JSON.stringify({
         filename: "active.prg",
         data: bytesToBase64(prgBytes),
@@ -385,7 +390,7 @@ dom.exportPrg.addEventListener("click", () => {
     const prgBytes = buildPrgBinary(dom.codeEditor.value);
     if (/CHR\$/i.test(source)) {
       const hasChrCallToken = prgBytes.some(
-        (value, i) => value === 0xc7 && prgBytes[i + 1] === 0x28
+        (value, i) => i + 1 < prgBytes.length && value === 0xc7 && prgBytes[i + 1] === 0x28
       );
       if (!hasChrCallToken) {
         throw new Error("Tokenizer sanity check failed for CHR$ call (expected C7 28 bytes).");

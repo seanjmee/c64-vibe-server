@@ -2,3 +2,4 @@ node_modules/
 .DS_Store
 runtime/*.prg
 runtime/*.jsonl
+runtime/*.json

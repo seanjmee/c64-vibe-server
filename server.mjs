@@ -7,8 +7,15 @@ const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || "127.0.0.1";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || 30000);
+const API_SHARED_SECRET = process.env.API_SHARED_SECRET || "";
+const API_KEY_HEADER = "x-c64-api-key";
+const RUN_LOG_ROTATE_BYTES = Number(process.env.RUN_LOG_ROTATE_BYTES || 5 * 1024 * 1024);
+const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000);
+const RATE_LIMIT_MAX_MUTATIONS = Number(process.env.RATE_LIMIT_MAX_MUTATIONS || 60);
 const RUNTIME_DIR = path.join(ROOT, "runtime");
 const RUN_LOG_PATH = path.join(RUNTIME_DIR, "runs.jsonl");
+const RUN_LOG_BACKUP_PATH = path.join(RUNTIME_DIR, "runs.1.jsonl");
 const PINNED_EXEMPLARS_PATH = path.join(RUNTIME_DIR, "pinned-exemplars.json");
 
 const CONTENT_TYPES = {
@@ -18,6 +25,47 @@ const CONTENT_TYPES = {
   ".css": "text/css; charset=utf-8",
   ".json": "application/json; charset=utf-8",
 };
+
+const runLogCache = {
+  data: [],
+  mtimeMs: -1,
+  size: -1,
+};
+
+const rateWindowByIp = new Map();
+
+function securityHeaders(contentType = "text/plain; charset=utf-8") {
+  return {
+    "Content-Type": contentType,
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "SAMEORIGIN",
+    "Content-Security-Policy":
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'",
+  };
+}
+
+function getRequestIp(req) {
+  const xff = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  if (xff) return xff;
+  return req.socket?.remoteAddress || "unknown";
+}
+
+function isRateLimited(req) {
+  const ip = getRequestIp(req);
+  const now = Date.now();
+  const windowStart = now - RATE_LIMIT_WINDOW_MS;
+  const recent = (rateWindowByIp.get(ip) || []).filter((t) => t >= windowStart);
+  recent.push(now);
+  rateWindowByIp.set(ip, recent);
+  return recent.length > RATE_LIMIT_MAX_MUTATIONS;
+}
+
+function isAuthorized(req) {
+  if (!API_SHARED_SECRET) return true;
+  const provided = String(req.headers[API_KEY_HEADER] || "");
+  return provided && provided === API_SHARED_SECRET;
+}
 
 function bouncingBallProgram() {
   return `10 POKE 53280,0:POKE 53281,0
@@ -609,29 +657,55 @@ async function ensureRuntimeDir() {
   await fs.mkdir(RUNTIME_DIR, { recursive: true });
 }
 
+async function rotateRunLogIfNeeded() {
+  try {
+    const stat = await fs.stat(RUN_LOG_PATH);
+    if (stat.size < RUN_LOG_ROTATE_BYTES) return;
+    await fs.rename(RUN_LOG_PATH, RUN_LOG_BACKUP_PATH).catch(async () => {
+      await fs.rm(RUN_LOG_BACKUP_PATH, { force: true });
+      await fs.rename(RUN_LOG_PATH, RUN_LOG_BACKUP_PATH);
+    });
+    runLogCache.data = [];
+    runLogCache.mtimeMs = -1;
+    runLogCache.size = -1;
+  } catch {
+    // ignore if log does not exist yet
+  }
+}
+
 async function appendRunLog(event) {
   await ensureRuntimeDir();
+  await rotateRunLogIfNeeded();
   const payload = {
     ...event,
     ts: new Date().toISOString(),
   };
   await fs.appendFile(RUN_LOG_PATH, `${JSON.stringify(payload)}\n`, "utf-8");
+  runLogCache.data.push(payload);
+  if (runLogCache.data.length > 5000) runLogCache.data = runLogCache.data.slice(-5000);
+  runLogCache.mtimeMs = Date.now();
+  runLogCache.size = runLogCache.size > 0 ? runLogCache.size + JSON.stringify(payload).length + 1 : runLogCache.size;
 }
 
 async function readRunLog(limit = 500) {
   try {
-    const content = await fs.readFile(RUN_LOG_PATH, "utf-8");
-    const lines = content.trim().split("\n").filter(Boolean);
-    return lines
-      .slice(Math.max(0, lines.length - limit))
-      .map((line) => {
-        try {
-          return JSON.parse(line);
-        } catch {
-          return null;
-        }
-      })
-      .filter(Boolean);
+    const stat = await fs.stat(RUN_LOG_PATH);
+    if (runLogCache.mtimeMs !== stat.mtimeMs || runLogCache.size !== stat.size || !runLogCache.data.length) {
+      const content = await fs.readFile(RUN_LOG_PATH, "utf-8");
+      const lines = content.trim().split("\n").filter(Boolean);
+      runLogCache.data = lines
+        .map((line) => {
+          try {
+            return JSON.parse(line);
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean);
+      runLogCache.mtimeMs = stat.mtimeMs;
+      runLogCache.size = stat.size;
+    }
+    return runLogCache.data.slice(Math.max(0, runLogCache.data.length - limit));
   } catch {
     return [];
   }
@@ -712,7 +786,7 @@ async function readBody(req) {
 }
 
 function json(res, code, payload) {
-  res.writeHead(code, { "Content-Type": "application/json; charset=utf-8" });
+  res.writeHead(code, securityHeaders("application/json; charset=utf-8"));
   res.end(JSON.stringify(payload));
 }
 
@@ -784,48 +858,56 @@ async function callOpenAI(prompt) {
     throw new Error("OPENAI_API_KEY is missing.");
   }
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      input: prompt,
-      text: {
-        format: {
-          type: "json_schema",
-          name: "c64_patch",
-          strict: true,
-          schema: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              rationale: { type: "string" },
-              operations: {
-                type: "array",
-                minItems: 1,
-                items: {
-                  type: "object",
-                  additionalProperties: false,
-                  properties: {
-                    op: { type: "string" },
-                    path: { type: "string" },
-                    content: { type: "string" },
-                    startLine: { type: "integer" },
-                    endLine: { type: "integer" },
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort("openai_timeout"), OPENAI_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        input: prompt,
+        text: {
+          format: {
+            type: "json_schema",
+            name: "c64_patch",
+            strict: true,
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                rationale: { type: "string" },
+                operations: {
+                  type: "array",
+                  minItems: 1,
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      op: { type: "string" },
+                      path: { type: "string" },
+                      content: { type: "string" },
+                      startLine: { type: "integer" },
+                      endLine: { type: "integer" },
+                    },
+                    required: ["op", "path", "content", "startLine", "endLine"],
                   },
-                  required: ["op", "path", "content", "startLine", "endLine"],
                 },
               },
+              required: ["rationale", "operations"],
             },
-            required: ["rationale", "operations"],
           },
         },
-      },
-    }),
-  });
+      }),
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -1411,7 +1493,7 @@ async function serveStatic(urlPath, res) {
   const fullPath = path.join(ROOT, cleanPath);
 
   if (!fullPath.startsWith(ROOT)) {
-    res.writeHead(403);
+    res.writeHead(403, securityHeaders("text/plain; charset=utf-8"));
     res.end("Forbidden");
     return;
   }
@@ -1420,16 +1502,27 @@ async function serveStatic(urlPath, res) {
     const data = await fs.readFile(fullPath);
     const ext = path.extname(fullPath);
     const contentType = CONTENT_TYPES[ext] || "application/octet-stream";
-    res.writeHead(200, { "Content-Type": contentType });
+    res.writeHead(200, securityHeaders(contentType));
     res.end(data);
   } catch {
-    res.writeHead(404);
+    res.writeHead(404, securityHeaders("text/plain; charset=utf-8"));
     res.end("Not found");
   }
 }
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
+
+  if (req.method === "POST" && url.pathname.startsWith("/api/")) {
+    if (!isAuthorized(req)) {
+      json(res, 401, { error: `Unauthorized. Provide ${API_KEY_HEADER} header.` });
+      return;
+    }
+    if (isRateLimited(req)) {
+      json(res, 429, { error: "Rate limit exceeded. Try again shortly." });
+      return;
+    }
+  }
 
   if (req.method === "POST" && url.pathname === "/api/generate") {
     await handleGenerate(req, res);
@@ -1476,7 +1569,7 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  res.writeHead(405);
+  res.writeHead(405, securityHeaders("text/plain; charset=utf-8"));
   res.end("Method not allowed");
 });
 

@@ -26,6 +26,11 @@ const state = {
   pinned: [],
 };
 
+function getApiHeaders() {
+  const key = localStorage.getItem("c64-vibe-api-key") || "";
+  return key ? { "x-c64-api-key": key } : {};
+}
+
 function escapeHtml(text) {
   return String(text || "").replace(/[<>&"]/g, (m) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" })[m]);
 }
@@ -101,7 +106,7 @@ function isPinned(family, prompt) {
 async function setPinned(entry, pinned) {
   await fetch("/api/exemplars/pinned", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...getApiHeaders() },
     body: JSON.stringify({
       family: entry.family,
       prompt: entry.prompt,
@@ -222,7 +227,7 @@ dom.runReplay.addEventListener("click", async () => {
   try {
     const response = await fetch("/api/replay", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...getApiHeaders() },
       body: JSON.stringify({
         prompt,
         code: "",
