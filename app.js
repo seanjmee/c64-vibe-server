@@ -138,6 +138,11 @@ function renderValidatorReport(report) {
   lines.push(`Strategy: ${String(report.strategy || "unknown")}`);
   lines.push(`Exemplars used: ${Number(report.exemplars_used || 0)}`);
   lines.push(`Typos normalized: ${report.normalized_changed ? "yes" : "no"}`);
+  if (report.confidence_score !== undefined) {
+    lines.push(
+      `Confidence: ${Number(report.confidence_score || 0)} (${report.confidence_accepted ? "accepted" : "rejected"})`
+    );
+  }
 
   const initial = Array.isArray(report.initial_issues) ? report.initial_issues : [];
   const final = Array.isArray(report.final_issues) ? report.final_issues : [];
@@ -150,6 +155,15 @@ function renderValidatorReport(report) {
   if (final.length > 8) lines.push(`- ... ${final.length - 8} more`);
 
   if (report.fallback_reason) lines.push(`Fallback reason: ${String(report.fallback_reason)}`);
+  if (Array.isArray(report.policy_hits) && report.policy_hits.length) {
+    lines.push(`Policy hits: ${report.policy_hits.join(", ")}`);
+  }
+  if (Array.isArray(report.lint_repair_ops) && report.lint_repair_ops.length) {
+    lines.push(`Lint repair ops: ${report.lint_repair_ops.join(", ")}`);
+  }
+  if (report.judge && typeof report.judge === "object") {
+    lines.push(`Judge: ${report.judge.verdict || "unknown"} (${Number(report.judge.score || 0)})`);
+  }
   dom.validatorReport.textContent = lines.join("\n");
 }
 
@@ -313,13 +327,14 @@ function normalizeCommonTypos(program) {
 
 async function buildAssistantResponse(prompt) {
   try {
+    const currentCode = dom.codeEditor.value;
     const aiPatch = await requestAIPatch({
       prompt,
-      code: dom.codeEditor.value,
+      code: currentCode,
       chatHistory: state.chat.slice(-8),
     });
 
-    const candidateRaw = applyOperations(dom.codeEditor.value, aiPatch.operations);
+    const candidateRaw = applyOperations(currentCode, aiPatch.operations);
     const candidate = normalizeCommonTypos(candidateRaw);
     if (!looksLikeBasicV2(candidate)) {
       throw new Error("Model returned non-C64 BASIC V2 output.");
@@ -330,12 +345,29 @@ async function buildAssistantResponse(prompt) {
     renderValidatorReport(state.validatorReport);
     persist();
 
-    return [
+    const report = state.validatorReport || {};
+    const status = String(report.status || "").toLowerCase();
+    const strategy = String(report.strategy || "model");
+    const modeLabel = status === "fallback" ? "fallback mode" : `${strategy} mode`;
+    const unchanged = candidate.trim() === currentCode.trim();
+    const initialIssues = Array.isArray(report.initial_issues) ? report.initial_issues : [];
+    const topIssues = initialIssues.slice(0, 3);
+    const detailLine = topIssues.length
+      ? `Top validator issues: ${topIssues.join(" | ")}`
+      : null;
+    const unchangedLine = unchanged
+      ? "No safe patch passed validation, so the previous program was preserved."
+      : null;
+
+    const parts = [
       `Plan: ${aiPatch.rationale}`,
-      "Patch prepared for `program.bas` (model mode):",
+      `Patch prepared for \`program.bas\` (${modeLabel}):`,
+      unchangedLine,
+      detailLine,
       candidate,
       "Click 'Apply Last Patch' then Run.",
-    ].join("\n\n");
+    ].filter(Boolean);
+    return parts.join("\n\n");
   } catch (error) {
     const fallback = buildFallbackResponse(prompt);
     return `${fallback}\n\nModel backend unavailable, used fallback: ${error.message}`;

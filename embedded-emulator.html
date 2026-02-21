@@ -75,11 +75,8 @@
           }
           try {
             instance.loadPrg(url + (url.includes("?") ? "&" : "?") + "t=" + Date.now());
-            // Some jsc64 builds occasionally drop the first queued RETURN.
-            // Re-queue RUN from the frame after load with short retries.
+            // Queue a single RUN command after load.
             queueRunCommand();
-            window.setTimeout(queueRunCommand, 120);
-            window.setTimeout(queueRunCommand, 320);
             setStatus("loaded " + url);
           } catch (error) {
             setStatus("load error: " + error.message);
@@ -98,8 +95,7 @@
             emu._mem.write(base + 1, 85); // U
             emu._mem.write(base + 2, 78); // N
             emu._mem.write(base + 3, 13); // RETURN
-            emu._mem.write(base + 4, 13); // RETURN (retry)
-            emu._mem.write(0xc6, 5);
+            emu._mem.write(0xc6, 4);
           } catch (error) {
             // no-op: best-effort queue injection
           }

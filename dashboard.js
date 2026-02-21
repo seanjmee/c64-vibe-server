@@ -13,21 +13,32 @@ const dom = {
   heatmap: document.getElementById("heatmap"),
   exemplarImpact: document.getElementById("exemplarImpact"),
   driftAlerts: document.getElementById("driftAlerts"),
+  policyEffectiveness: document.getElementById("policyEffectiveness"),
+  confidenceJudge: document.getElementById("confidenceJudge"),
   exemplarRows: document.getElementById("exemplarRows"),
   pinnedRows: document.getElementById("pinnedRows"),
   replayPrompt: document.getElementById("replayPrompt"),
   runReplay: document.getElementById("runReplay"),
   replayJudge: document.getElementById("replayJudge"),
   replayResult: document.getElementById("replayResult"),
+  clientApiKey: document.getElementById("clientApiKey"),
+  openaiOverride: document.getElementById("openaiOverride"),
+  enableJudge: document.getElementById("enableJudge"),
+  judgeGate: document.getElementById("judgeGate"),
+  confidenceThreshold: document.getElementById("confidenceThreshold"),
+  saveConfig: document.getElementById("saveConfig"),
+  configStatus: document.getElementById("configStatus"),
 };
 
 const state = {
   detail: null,
   pinned: [],
+  config: null,
 };
+const CLIENT_API_KEY_STORAGE = "c64-vibe-api-key";
 
 function getApiHeaders() {
-  const key = localStorage.getItem("c64-vibe-api-key") || "";
+  const key = localStorage.getItem(CLIENT_API_KEY_STORAGE) || "";
   return key ? { "x-c64-api-key": key } : {};
 }
 
@@ -199,21 +210,53 @@ function renderAll(detail) {
   ];
   setList(dom.driftAlerts, driftItems);
 
+  setList(
+    dom.policyEffectiveness,
+    (detail.policy_effectiveness || []).slice(0, 12).map((x) => `${x.policy}: hits ${x.hits}, saves ${x.saves}, save ${x.save_rate}%`)
+  );
+  const confidence = detail.confidence || {};
+  const judge = detail.judge || {};
+  setList(dom.confidenceJudge, [
+    `Confidence avg: ${confidence.avg_score || 0} (threshold ${confidence.threshold || 0})`,
+    `Confidence rejected runs: ${confidence.rejected_runs || 0}`,
+    `Judge enabled: ${judge.enabled ? "yes" : "no"} (gate ${judge.gate_enabled ? "on" : "off"})`,
+    `Judge pass rate: ${judge.pass_rate || 0}% (avg score ${judge.avg_score || 0})`,
+  ]);
+
   renderRecentRows(detail.recent_generations || []);
   renderExemplarRows(detail.exemplar_library || []);
 }
 
+function renderConfig(config) {
+  if (!config || typeof config !== "object") return;
+  state.config = config;
+  dom.enableJudge.checked = Boolean(config.enable_llm_judge);
+  dom.judgeGate.checked = Boolean(config.llm_judge_gate);
+  dom.confidenceThreshold.value = String(Number(config.normalization_confidence_min ?? 0.45));
+  dom.clientApiKey.value = localStorage.getItem(CLIENT_API_KEY_STORAGE) || "";
+  dom.configStatus.textContent = `OpenAI configured: ${config.openai_configured ? "yes" : "no"}${
+    config.openai_api_key_override_set ? " (override active)" : ""
+  }`;
+}
+
 async function refresh() {
-  const [detailRes, pinnedRes] = await Promise.all([fetch("/api/metrics/detail"), fetch("/api/exemplars/pinned")]);
+  const [detailRes, pinnedRes, configRes] = await Promise.all([
+    fetch("/api/metrics/detail", { headers: { ...getApiHeaders() } }),
+    fetch("/api/exemplars/pinned", { headers: { ...getApiHeaders() } }),
+    fetch("/api/config", { headers: { ...getApiHeaders() } }),
+  ]);
   const detail = await detailRes.json();
   const pinned = await pinnedRes.json();
+  const config = await configRes.json();
   if (!detailRes.ok) throw new Error(detail.error || "metrics unavailable");
   if (!pinnedRes.ok) throw new Error(pinned.error || "pinned exemplars unavailable");
+  if (!configRes.ok) throw new Error(config.error || "config unavailable");
 
   state.detail = detail;
   state.pinned = Array.isArray(pinned.exemplars) ? pinned.exemplars : [];
   renderAll(detail);
   renderPinnedRows(state.pinned);
+  renderConfig(config);
 }
 
 dom.refresh.addEventListener("click", () => {
@@ -248,6 +291,32 @@ dom.runReplay.addEventListener("click", async () => {
     await refresh();
   } catch (error) {
     dom.replayResult.textContent = `Replay failed: ${error.message}`;
+  }
+});
+
+dom.saveConfig.addEventListener("click", async () => {
+  dom.configStatus.textContent = "Saving...";
+  try {
+    localStorage.setItem(CLIENT_API_KEY_STORAGE, String(dom.clientApiKey.value || "").trim());
+    const threshold = Number(dom.confidenceThreshold.value || 0.45);
+    const response = await fetch("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getApiHeaders() },
+      body: JSON.stringify({
+        enable_llm_judge: Boolean(dom.enableJudge.checked),
+        llm_judge_gate: Boolean(dom.judgeGate.checked),
+        normalization_confidence_min: threshold,
+        openai_api_key_override: String(dom.openaiOverride.value || "").trim(),
+      }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "config save failed");
+    renderConfig(payload.config || {});
+    dom.openaiOverride.value = "";
+    dom.configStatus.textContent = "Saved.";
+    await refresh();
+  } catch (error) {
+    dom.configStatus.textContent = `Save failed: ${error.message}`;
   }
 });
 
